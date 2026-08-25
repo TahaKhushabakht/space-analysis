@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Third-party tracking data is NOT redistributed here.
+# This project reads Metrica sample data READ-ONLY from a sibling checkout:
+#   ../surplus_value_model/data/metrica/data
+# Obtain it by cloning https://github.com/metrica-sports/sample-data into that path.
+data/
+
+# Editor
+.vscode/
+.idea/
+
+# Private working notes — kept locally, not published.
+/NOTES.md
+/docs/idea-space-gravity.md
+/docs/data-scope.md
+/docs/dashboard.md

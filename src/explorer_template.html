@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  :root{
+    --bg:#11151c; --panel:#1a212b; --line:#2c3644; --ink:#e6ecf3; --dim:#8fa0b4;
+    --accent:#5db3ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif}
+  header{padding:14px 18px;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:16px;font-weight:600}
+  .sub{color:var(--dim);font-size:12px;margin-top:3px}
+  .wrap{display:flex;gap:16px;padding:16px 18px;align-items:flex-start;flex-wrap:wrap}
+  .stage{flex:1 1 720px;min-width:340px}
+  canvas{width:100%;height:auto;display:block;background:#0d1117;
+         border:1px solid var(--line);border-radius:6px}
+  .side{flex:0 0 260px;min-width:230px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:6px;
+        padding:12px;margin-bottom:12px}
+  .card h2{margin:0 0 8px;font-size:12px;font-weight:600;letter-spacing:.04em;
+           text-transform:uppercase;color:var(--dim)}
+  label{display:block;margin:7px 0;font-size:13px;cursor:pointer}
+  input[type=checkbox],input[type=radio]{accent-color:var(--accent);margin-right:6px}
+  select,button{font:inherit;color:var(--ink);background:#222c39;
+                border:1px solid var(--line);border-radius:5px;padding:6px 9px}
+  select{width:100%}
+  button{cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button.on{background:var(--accent);color:#08121c;border-color:var(--accent);font-weight:600}
+  .controls{display:flex;gap:8px;align-items:center;margin:10px 0 4px}
+  input[type=range]{flex:1;accent-color:var(--accent)}
+  .readout{font-variant-numeric:tabular-nums;color:var(--dim);font-size:12px;
+           display:flex;justify-content:space-between;gap:10px}
+  .swatches{display:flex;height:12px;border-radius:3px;overflow:hidden;margin:6px 0 4px}
+  .swatches div{flex:1}
+  .lbl{display:flex;justify-content:space-between;font-size:11px;color:var(--dim)}
+  .note{font-size:11px;color:var(--dim);line-height:1.45;margin-top:8px}
+  .pin{font-size:12px;color:var(--accent);margin-top:6px;min-height:16px}
+</style>
+</head>
+<body>
+<header>
+  <h1>__TITLE__</h1>
+  <div class="sub">__SUBTITLE__</div>
+</header>
+
+<div class="wrap">
+  <div class="stage">
+    <canvas id="cv" width="1050" height="680"></canvas>
+    <div class="controls">
+      <button id="play">▶ Play</button>
+      <input type="range" id="scrub" min="0" max="0" value="0" step="1">
+      <button id="pin">Pin t₀</button>
+    </div>
+    <div class="readout">
+      <span id="clock">—</span>
+      <span id="pininfo" class="pin"></span>
+      <span id="stat">—</span>
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="card">
+      <h2>Passage</h2>
+      <select id="passage"></select>
+      <div class="note" id="pdesc"></div>
+    </div>
+
+    <div class="card">
+      <h2>Layer</h2>
+      <label><input type="radio" name="layer" value="relief" checked> Relief <span class="note">h = v·(1−2C)</span></label>
+      <label><input type="radio" name="layer" value="cov"> Coverage only <span class="note">1−2C, unweighted</span></label>
+      <label><input type="radio" name="layer" value="diff"> Change since pinned t₀</label>
+      <div class="swatches" id="ramp"></div>
+      <div class="lbl"><span id="lo">—</span><span id="hi">—</span></div>
+      <div class="note" id="legend"></div>
+    </div>
+
+    <div class="card">
+      <h2>Options</h2>
+      <label><input type="checkbox" id="offside" checked> Apply offside mask</label>
+      <label><input type="checkbox" id="players" checked> Show players &amp; ball</label>
+      <label><input type="checkbox" id="oline" checked> Show offside line</label>
+      <div class="note">
+        Attack is always toward the <b>right</b>. Red = defenders, blue = attackers.
+        τ=__TAU__s, τ_run=__TAURUN__s (θ is unused — relief is continuous, not thresholded).
+        <br><br>Colour is <b>linear</b> in every layer, deliberately. An earlier build
+        applied a √ scale so midfield would show more structure; it amplified
+        near-worthless open space into the first "valuable" band, which is exactly the
+        illusion the value weighting exists to remove. If you want structure across the
+        whole pitch, use <b>Coverage only</b> and know you are looking at space
+        regardless of worth.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script id="payload" type="application/json">__DATA__</script>
+<script>
+const D = JSON.parse(document.getElementById('payload').textContent);
+const G = D.grid, NX = G.nx, NY = G.ny;
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const off = document.createElement('canvas'); off.width = NX; off.height = NY;
+const octx = off.getContext('2d');
+
+function b64bytes(s){
+  const bin = atob(s), out = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+// numpy packbits: MSB-first within each byte
+function unpackBits(bytes, n){
+  const out = new Uint8Array(n);
+  for(let i=0;i<n;i++) out[i] = (bytes[i>>3] >> (7-(i&7))) & 1;
+  return out;
+}
+
+// Decode passages once.
+D.passages.forEach(p=>{
+  p.value = b64bytes(p.value_b64);
+  p.cov   = b64bytes(p.cov_b64);
+  const packedLen = Math.ceil(NX*NY/8);
+  p.expl  = [];
+  const eb = b64bytes(p.expl_b64);
+  for(let f=0; f<p.frames.length; f++)
+    p.expl.push(unpackBits(eb.subarray(f*packedLen,(f+1)*packedLen), NX*NY));
+  delete p.value_b64; delete p.cov_b64; delete p.expl_b64;
+});
+
+let P = D.passages[0], t = 0, pinned = null, playing = false, timer = null;
+const N = NX*NY;
+
+// h for frame f, honouring the offside toggle. value/coverage are uint8-quantised.
+function heights(f){
+  const useMask = document.getElementById('offside').checked;
+  const cov = P.cov.subarray(f*N, (f+1)*N), ex = P.expl[f], val = P.value;
+  const h = new Float32Array(N);
+  for(let i=0;i<N;i++){
+    if(useMask && !ex[i]) continue;          // space the attack may not legally use
+    const v = val[i]*D.value_scale;
+    h[i] = v*(1 - 2*(cov[i]/255));
+  }
+  return h;
+}
+
+// Banded diverging ramps — discrete steps read as contour bands on a relief map.
+// Neutral sits near the page background so genuinely flat ground (worthless, whoever
+// holds it) recedes, and only what matters carries colour.
+const RELIEF = [[24,84,150],[32,104,172],[48,128,190],[74,152,200],[104,166,196],
+                [26,32,42],
+                [150,120,60],[190,146,58],[220,152,48],[224,110,40],[196,58,38]];
+const DIFF   = [[122,42,152],[146,64,176],[170,96,196],[186,132,208],[150,116,168],
+                [26,32,42],
+                [110,150,112],[124,186,120],[88,200,102],[48,174,80],[24,138,62]];
+
+function paint(){
+  const f = t;
+  const mode = document.querySelector('input[name=layer]:checked').value;
+  const isDiff = mode === 'diff';
+  const h = heights(f);
+  let field = h, ramp = RELIEF, scale = D.h_scale;
+  if(mode === 'cov'){
+    // Unweighted: 1 − 2C, so every part of the pitch shows structure. Says nothing about
+    // whether the space is worth anything — that is what the relief layer is for.
+    const cov = P.cov.subarray(f*N,(f+1)*N), ex = P.expl[f];
+    const useMask = document.getElementById('offside').checked;
+    field = new Float32Array(N);
+    for(let i=0;i<N;i++) field[i] = (useMask && !ex[i]) ? 0 : 1 - 2*(cov[i]/255);
+    scale = 1.0;
+  } else if(isDiff){
+    if(pinned === null){ ramp = DIFF; field = new Float32Array(N); scale = D.d_scale; }
+    else {
+      const h0 = heights(pinned);
+      field = new Float32Array(N);
+      for(let i=0;i<N;i++) field[i] = h[i]-h0[i];
+      ramp = DIFF; scale = D.d_scale;
+    }
+  }
+  const img = octx.createImageData(NX, NY);
+  for(let i=0;i<N;i++){
+    let z = field[i]/scale;                       // -1 .. +1, LINEAR (see Options note)
+    z = Math.max(-1, Math.min(1, z));
+    const band = Math.round((z+1)/2*(ramp.length-1));
+    const c = ramp[band];
+    const o = i*4;
+    img.data[o]=c[0]; img.data[o+1]=c[1]; img.data[o+2]=c[2]; img.data[o+3]=255;
+  }
+  octx.putImageData(img,0,0);
+  ctx.clearRect(0,0,cv.width,cv.height);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(off,0,0,cv.width,cv.height);
+
+  drawPitch();
+  const fr = P.frames[f];
+  if(document.getElementById('oline').checked) drawOffside(fr.ox);
+  if(document.getElementById('players').checked) drawPlayers(fr);
+
+  document.getElementById('clock').textContent =
+    `P${P.period}  ${fmt(fr.t)}   frame ${f+1}/${P.frames.length}`;
+  let s = 0; for(let i=0;i<N;i++) if(field[i]>0) s += field[i];
+  s *= G.cell_m*G.cell_m;
+  const statLabel = {relief:'peak volume (xT·m²): ', cov:'uncovered area (m²): ',
+                     diff:'opened since t₀ (xT·m²): '}[mode];
+  document.getElementById('stat').textContent = statLabel + s.toFixed(2);
+  document.getElementById('scrub').value = f;
+}
+
+function fmt(sec){ const m=Math.floor(sec/60), s=Math.floor(sec%60);
+  return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0'); }
+const X = x => (x + 52.5)/105*cv.width;
+const Y = y => (34 - y)/68*cv.height;          // world +y up -> canvas y down
+
+function drawPitch(){
+  ctx.strokeStyle='rgba(255,255,255,.42)'; ctx.lineWidth=1.5;
+  ctx.strokeRect(X(-52.5),Y(34),X(52.5)-X(-52.5),Y(-34)-Y(34));
+  ctx.beginPath(); ctx.moveTo(X(0),Y(34)); ctx.lineTo(X(0),Y(-34)); ctx.stroke();
+  ctx.beginPath(); ctx.arc(X(0),Y(0),(X(9.15)-X(0)),0,Math.PI*2); ctx.stroke();
+  [[-1],[1]].forEach(([s])=>{
+    [[16.5,40.32],[5.5,18.32]].forEach(([d,w])=>{
+      const x0=s*52.5, x1=s*(52.5-d);
+      ctx.beginPath();
+      ctx.moveTo(X(x0),Y(-w/2)); ctx.lineTo(X(x1),Y(-w/2));
+      ctx.lineTo(X(x1),Y(w/2));  ctx.lineTo(X(x0),Y(w/2)); ctx.stroke();
+    });
+    ctx.lineWidth=3.5; ctx.beginPath();
+    ctx.moveTo(X(s*52.5),Y(-3.66)); ctx.lineTo(X(s*52.5),Y(3.66)); ctx.stroke();
+    ctx.lineWidth=1.5;
+  });
+}
+function drawOffside(ox){
+  ctx.save(); ctx.setLineDash([7,6]); ctx.strokeStyle='rgba(255,255,255,.75)';
+  ctx.lineWidth=1.6; ctx.beginPath();
+  ctx.moveTo(X(ox),Y(34)); ctx.lineTo(X(ox),Y(-34)); ctx.stroke(); ctx.restore();
+}
+function dot(x,y,fill,r){
+  ctx.beginPath(); ctx.arc(X(x),Y(y),r,0,Math.PI*2);
+  ctx.fillStyle=fill; ctx.fill();
+  ctx.lineWidth=1.4; ctx.strokeStyle='rgba(255,255,255,.9)'; ctx.stroke();
+}
+function drawPlayers(fr){
+  fr.d.forEach(q=>dot(q[0],q[1],'#e0433c',7));
+  fr.a.forEach(q=>dot(q[0],q[1],'#3d8fe0',7));
+  if(fr.b) dot(fr.b[0],fr.b[1],'#ffffff',5);
+}
+
+const LEGEND = {
+  relief: ['defense owns it', 'open & valuable',
+    'Peaks (warm) are valuable ground the defense cannot reach in τ. Depressions (blue) are valuable ground it controls. Worthless ground stays flat regardless of who holds it — that flatness is the point, not a rendering failure.'],
+  cov: ['covered', 'uncovered',
+    'Unweighted reach: warm = no defender arrives within τ, blue = covered. Shows structure across the whole pitch, but says NOTHING about whether that space is worth having. Most of it is not.'],
+  diff: ['closed down', 'opened up',
+    'Difference from the pinned frame. Green = valuable space that opened since t₀; purple = space the defense recovered. Pin a moment first, then scrub.'],
+};
+function setRamp(){
+  const mode = document.querySelector('input[name=layer]:checked').value;
+  const ramp = mode === 'diff' ? DIFF : RELIEF;
+  document.getElementById('ramp').innerHTML =
+    ramp.map(c=>`<div style="background:rgb(${c[0]},${c[1]},${c[2]})"></div>`).join('');
+  const [lo, hi, note] = LEGEND[mode];
+  document.getElementById('lo').textContent = lo;
+  document.getElementById('hi').textContent = hi;
+  document.getElementById('legend').textContent = note;
+}
+
+function loadPassage(i){
+  P = D.passages[i]; t = 0; pinned = null;
+  document.getElementById('scrub').max = P.frames.length-1;
+  document.getElementById('pininfo').textContent = '';
+  document.getElementById('pdesc').textContent =
+    `${P.frames.length} frames · ${P.attacking} attacking · ends in the shot`;
+  paint();
+}
+
+document.getElementById('passage').innerHTML =
+  D.passages.map((p,i)=>`<option value="${i}">${p.label}</option>`).join('');
+document.getElementById('passage').onchange = e=>loadPassage(+e.target.value);
+document.getElementById('scrub').oninput = e=>{ t=+e.target.value; paint(); };
+document.getElementById('pin').onclick = ()=>{
+  pinned = t;
+  document.getElementById('pininfo').textContent = `t₀ pinned at ${fmt(P.frames[t].t)}`;
+  paint();
+};
+document.querySelectorAll('input[name=layer]').forEach(r=>r.onchange=()=>{setRamp();paint();});
+['offside','players','oline'].forEach(id=>document.getElementById(id).onchange=paint);
+document.getElementById('play').onclick = function(){
+  playing = !playing; this.textContent = playing ? '❚❚ Pause' : '▶ Play';
+  this.classList.toggle('on', playing);
+  if(playing){
+    timer = setInterval(()=>{ t = (t+1) % P.frames.length; paint(); }, 120);
+  } else clearInterval(timer);
+};
+document.addEventListener('keydown', e=>{
+  if(e.key==='ArrowRight'){ t=Math.min(t+1,P.frames.length-1); paint(); }
+  if(e.key==='ArrowLeft'){ t=Math.max(t-1,0); paint(); }
+});
+
+setRamp();
+loadPassage(0);
+</script>
+</body>
+</html>
